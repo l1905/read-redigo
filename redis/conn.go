@@ -34,26 +34,32 @@ var (
 )
 
 // conn is the low-level implementation of Conn
+// 底层连接 实例管理
 type conn struct {
-	// Shared
+	// Shared 
+	// 网络连接实例
 	mu      sync.Mutex
 	pending int
 	err     error
 	conn    net.Conn
 
 	// Read
+	// 读参数
 	readTimeout time.Duration
 	br          *bufio.Reader
 
 	// Write
+	// 写参数
 	writeTimeout time.Duration
 	bw           *bufio.Writer
 
 	// Scratch space for formatting argument length.
 	// '*' or '$', length, "\r\n"
+	// 格式化参数
 	lenScratch [32]byte
 
 	// Scratch space for formatting integers and floats.
+	// 格式化参数
 	numScratch [40]byte
 }
 
@@ -61,6 +67,7 @@ type conn struct {
 // connection to the server, writing a command and reading a reply.
 //
 // Deprecated: Use Dial with options instead.
+// 建立单次连接
 func DialTimeout(network, address string, connectTimeout, readTimeout, writeTimeout time.Duration) (Conn, error) {
 	return Dial(network, address,
 		DialConnectTimeout(connectTimeout),
@@ -176,6 +183,7 @@ func DialUseTLS(useTLS bool) DialOption {
 
 // Dial connects to the Redis server at the given network and
 // address using the specified options.
+// 建立连接
 func Dial(network, address string, options ...DialOption) (Conn, error) {
 	do := dialOptions{
 		dialer: &net.Dialer{
@@ -217,7 +225,7 @@ func Dial(network, address string, options ...DialOption) (Conn, error) {
 		}
 		netConn = tlsConn
 	}
-
+	// 初始化连接， 连接实例conn, 写bw, 读br
 	c := &conn{
 		conn:         netConn,
 		bw:           bufio.NewWriter(netConn),
@@ -255,6 +263,7 @@ var pathDBRegexp = regexp.MustCompile(`/(\d*)\z`)
 // DialURL connects to a Redis server at the given URL using the Redis
 // URI scheme. URLs should follow the draft IANA specification for the
 // scheme (https://www.iana.org/assignments/uri-schemes/prov/redis).
+// 根据URL 建立连接
 func DialURL(rawurl string, options ...DialOption) (Conn, error) {
 	u, err := url.Parse(rawurl)
 	if err != nil {
@@ -351,6 +360,7 @@ func (c *conn) Err() error {
 	return err
 }
 
+// 设置发送长度
 func (c *conn) writeLen(prefix byte, n int) error {
 	c.lenScratch[len(c.lenScratch)-1] = '\n'
 	c.lenScratch[len(c.lenScratch)-2] = '\r'
@@ -368,13 +378,19 @@ func (c *conn) writeLen(prefix byte, n int) error {
 	return err
 }
 
+// 写内容字符串
 func (c *conn) writeString(s string) error {
+	// 写长度
 	c.writeLen('$', len(s))
+	// 写内容
 	c.bw.WriteString(s)
+	
+	// 写结束crlf
 	_, err := c.bw.WriteString("\r\n")
 	return err
 }
 
+// 写内容字节
 func (c *conn) writeBytes(p []byte) error {
 	c.writeLen('$', len(p))
 	c.bw.Write(p)
@@ -382,19 +398,24 @@ func (c *conn) writeBytes(p []byte) error {
 	return err
 }
 
+// 写入write, 将数字转化为byte
 func (c *conn) writeInt64(n int64) error {
 	return c.writeBytes(strconv.AppendInt(c.numScratch[:0], n, 10))
 }
 
+// 写入write, 将float64转化为error
 func (c *conn) writeFloat64(n float64) error {
 	return c.writeBytes(strconv.AppendFloat(c.numScratch[:0], n, 'g', -1, 64))
 }
 
+// 写入命令
 func (c *conn) writeCommand(cmd string, args []interface{}) error {
 	c.writeLen('*', 1+len(args))
+	// 写入命令
 	if err := c.writeString(cmd); err != nil {
 		return err
 	}
+	// 循环写入参数
 	for _, arg := range args {
 		if err := c.writeArg(arg, true); err != nil {
 			return err
@@ -403,6 +424,7 @@ func (c *conn) writeCommand(cmd string, args []interface{}) error {
 	return nil
 }
 
+// 写入参数
 func (c *conn) writeArg(arg interface{}, argumentTypeOK bool) (err error) {
 	switch arg := arg.(type) {
 	case string:
@@ -424,6 +446,7 @@ func (c *conn) writeArg(arg interface{}, argumentTypeOK bool) (err error) {
 	case nil:
 		return c.writeString("")
 	case Argument:
+		// 递归写入
 		if argumentTypeOK {
 			return c.writeArg(arg.RedisArg(), false)
 		}
@@ -448,10 +471,12 @@ func (pe protocolError) Error() string {
 }
 
 // readLine reads a line of input from the RESP stream.
+// 读取一行
 func (c *conn) readLine() ([]byte, error) {
 	// To avoid allocations, attempt to read the line using ReadSlice. This
 	// call typically succeeds. The known case where the call fails is when
 	// reading the output from the MONITOR command.
+	// 避免重复内存分配， 使用readSlice 命令切分， 如果命令是MONITOR ,会导致失败
 	p, err := c.br.ReadSlice('\n')
 	if err == bufio.ErrBufferFull {
 		// The line does not fit in the bufio.Reader's buffer. Fall back to
@@ -474,6 +499,7 @@ func (c *conn) readLine() ([]byte, error) {
 }
 
 // parseLen parses bulk string and array lengths.
+// 解析返回数据的长度
 func parseLen(p []byte) (int, error) {
 	if len(p) == 0 {
 		return -1, protocolError("malformed length")
@@ -497,6 +523,7 @@ func parseLen(p []byte) (int, error) {
 }
 
 // parseInt parses an integer reply.
+// 解析返回的数字
 func parseInt(p []byte) (interface{}, error) {
 	if len(p) == 0 {
 		return 0, protocolError("malformed integer")
@@ -531,6 +558,7 @@ var (
 	pongReply interface{} = "PONG"
 )
 
+// 读取解析数据
 func (c *conn) readReply() (interface{}, error) {
 	line, err := c.readLine()
 	if err != nil {
@@ -561,10 +589,12 @@ func (c *conn) readReply() (interface{}, error) {
 			return nil, err
 		}
 		p := make([]byte, n)
+		// 读取实际内容
 		_, err = io.ReadFull(c.br, p)
 		if err != nil {
 			return nil, err
 		}
+		//
 		if line, err := c.readLine(); err != nil {
 			return nil, err
 		} else if len(line) != 0 {
@@ -577,6 +607,7 @@ func (c *conn) readReply() (interface{}, error) {
 			return nil, err
 		}
 		r := make([]interface{}, n)
+		// 批量递归获取
 		for i := range r {
 			r[i], err = c.readReply()
 			if err != nil {
@@ -587,7 +618,7 @@ func (c *conn) readReply() (interface{}, error) {
 	}
 	return nil, protocolError("unexpected response line")
 }
-
+// 发送命令
 func (c *conn) Send(cmd string, args ...interface{}) error {
 	c.mu.Lock()
 	c.pending += 1
@@ -601,6 +632,7 @@ func (c *conn) Send(cmd string, args ...interface{}) error {
 	return nil
 }
 
+// 将暂存的命令全部刷到网络连接中
 func (c *conn) Flush() error {
 	if c.writeTimeout != 0 {
 		c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
@@ -610,7 +642,7 @@ func (c *conn) Flush() error {
 	}
 	return nil
 }
-
+// 接收命令
 func (c *conn) Receive() (interface{}, error) {
 	return c.ReceiveWithTimeout(c.readTimeout)
 }
